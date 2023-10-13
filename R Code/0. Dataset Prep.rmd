@@ -1,0 +1,208 @@
+---
+title: "Dataset Prep"
+author: "Will Ball"
+date: "2023-08-15"
+output: html_document
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+Dataset Version: 3
+
+Prepping datasets for table 2 (by year): - % w/ MH prescription - % w/
+ADHD pres - % w/ antidep pres - % w/ CAMHS ref - % w/ A&E psych - % w/ - % w/ SMR04
+Inpatient psych
+
+## Library
+
+```{r}
+options(scipen = 999)
+
+library(tidyverse) # lib.loc = "C:/Program Files/R/R-4.2.1patched/library")
+library(tidylog)
+library(vroom)
+library(janitor)
+library(lubridate)
+library(readxl)
+```
+
+## CPR IDs
+
+```{r}
+cpr_ids <- vroom("H:/DaSH520/Data/Raw_Data/Release_v3_20230814/DaSH520_ACCCPR_Release_v3.txt", delim = "|") %>% 
+  clean_names() %>% 
+  rename(id = da_sh520_study_num) %>%
+  filter(date_registered >= as_date("2012-01-01")) %>%
+  select(id) %>% 
+  group_by(id) %>%
+  slice(1) %>% 
+  pull()
+```
+
+## CPR
+
+```{r}
+cpr <- vroom("H:/DaSH520/Data/Raw_Data/Release_v3_20230814/DaSH520_ACCCPR_Release_v3.txt", delim = "|") %>% 
+  clean_names() %>% 
+  rename(id = da_sh520_study_num,
+         registered = date_registered,
+         removed = date_de_registered) %>% 
+  mutate(age_at_reg = month_of_birth %--% registered %/% years(1),
+         age_at_rem = month_of_birth %--% removed %/% years(1),
+         days_on_reg = registered %--% removed %/% days(1),
+         year_reg = year(registered),
+         year_rem = year(removed),
+         sex = if_else(chi_matched_flag == 0, NA_real_, sex)) %>%
+  write_delim("H:/DaSH520/Workspaces/Will/Tables/data/cpr.csv", delim = ",")
+```
+
+
+## PIS
+
+```{r}
+# 1. Import original data. Rename and derive
+pis_original <- vroom("H:/DaSH520/Data/Raw_Data/Release_v3_20230814/DaSH520_PIS_Release_v3.txt", delim = "|") %>% 
+  clean_names() %>%
+  rename(id = da_sh520_study_num,                            # rename for clarity
+         datazone_2012 = dz_2012,
+         datazone_2016 = dz_2016,
+         datazone_2020 = dz_2020v2,
+         bnf_item = bnf_item_code) %>%
+  mutate(bnf_chapter = str_sub(bnf_item, start = 1, end = 2),      # Derive BNF chapter/section/subsection/paragraph codes
+         bnf_section = str_sub(bnf_item, start = 1, end = 4),
+         bnf_subsec = str_sub(bnf_item, start = 1, end = 6),
+         bnf_para = str_sub(bnf_item, start = 1, end = 7),
+         month_of_birth = as_date(month_of_birth),                     # Change from datetime class to just date
+         chi_mob = as_date(chi_mob),
+         pis_date = as_date(pis_date),
+         paid_date = as_date(paid_date),
+         prescribed_date = as_date(prescribed_date),
+         dispensed_date = as_date(dispensed_date))
+
+# NA MOB fix
+pis_original$month_of_birth[is.na(pis_original$month_of_birth)] <- pis_original$chi_mob[is.na(pis_original$month_of_birth)]
+
+# Age fixes
+minus_age <- pis_original %>%
+  filter(month_of_birth >= pis_date) %>%
+  select(id, pis_date, pis_date_source, paid_date, prescribed_date, month_of_birth, chi_mob, dob_source) %>% 
+  mutate(mob_agree = case_when(
+           month_of_birth == chi_mob ~ 1,
+           TRUE                      ~ 0))
+
+prob_ids <- minus_age %>% 
+  filter(mob_agree == 0) %>% 
+  distinct(id) %>% 
+  pull(id)
+
+minus_age_agree_ids <- minus_age %>% 
+  filter(mob_agree == 1) %>% 
+  distinct(id) %>% 
+  pull(id)
+
+pis_original <- pis_original %>% 
+  mutate(month_of_birth = if_else(id %in% prob_ids, chi_mob, month_of_birth),
+         age = (month_of_birth %--% pis_date %/% years(1))) %>%
+  filter(!(id %in% minus_age_agree_ids))
+
+# Missing BNF item codes & removing dummy
+no_bnf_meds <- pis_original %>%
+  filter(is.na(bnf_item) | bnf_item == "NULL") %>% 
+  distinct(approved_name) %>% 
+  pull(approved_name)
+
+meds1 <- pis_original %>%
+  filter(approved_name %in% no_bnf_meds) %>%
+  filter(!is.na(bnf_chapter)) %>% 
+  count(approved_name, bnf_chapter, bnf_section, bnf_subsec, bnf_para) %>% 
+  group_by(approved_name) %>%
+  arrange(desc(n), .by_group = T) %>% 
+  top_n(1)
+
+pis_original <- pis_original %>% 
+  filter(!(approved_name == "DUMMY")) %>% 
+  left_join(meds1, by = "approved_name") %>% 
+              mutate(bnf_chapter = coalesce(bnf_chapter.x, bnf_chapter.y),
+                     bnf_section = coalesce(bnf_section.x, bnf_section.y),
+                     bnf_subsec = coalesce(bnf_subsec.x, bnf_subsec.y),
+                     bnf_para = coalesce(bnf_para.x, bnf_para.y)) %>%
+  select(!ends_with(c(".x",".y")))
+
+# Duplicate records (v3) - 2nd id from each pair (i.e. n individuals with duplicate records)
+dupe_ids <- c() # From 'Data/Raw_Data/Release_v3_20230814/ReadMe/DaSH520 - note for researchers.txt'
+
+pis_dupes <- pis_original %>% 
+  filter(id %in% dupe_ids)
+
+# Remove duplicates
+pis_original <- pis_original %>% 
+  mutate(dupe = if_else(id %in% dupe_ids, 1, 0)) %>% 
+  filter(dupe == 0) %>% 
+  select(!dupe)
+
+# Mental Health meds only
+mh_meds_subsec <- c("040101","040102","040103","040201","040202","040203","040301","040302","040303","040304","041001","041002","041003")
+
+pis_original <- pis_original %>%
+  filter(bnf_subsec %in% mh_meds_subsec | bnf_section == "0404") %>%
+  mutate(year = year(pis_date),
+         prescription_flag = 1,
+         adhd_flag = case_when(
+           bnf_section == "0404" ~ 1,
+           bnf_section != "0404" ~ 0),
+         antidep_flag = case_when(
+           bnf_section == "0403" ~ 1,
+           bnf_section != "0403" ~ 0)) %>% 
+  write_delim("data/pis_full.csv", delim = ",")
+
+# 2. Cut down to only cpr ids
+pis_cpr <- pis_original %>% 
+  filter(id %in% cpr_ids) %>% 
+  filter(age %in% c(2:17)) %>% 
+  write_delim("data/pis_cpr.csv", delim = ",")
+```
+
+## CAMHS
+
+```{r}
+camhs_original <- vroom("H:/DaSH520/Data/Raw_Data/Release_v3_20230814/DaSH520_CAMHS_Release_v3.txt", delim = "|") %>% 
+  clean_names() %>%
+  rename(id = da_sh520_study_num) 
+
+  # Clean up Dates
+camhs_original <- camhs_original %>% 
+  mutate(age_at_referral = month_of_birth %--% referred_date %/% years(1),
+         referred_date = if_else(referred_date < "2012-01-01", NA_Date_, as_date(referred_date)),
+         screening_date = if_else(screening_date < "2012-01-01", NA_Date_, as_date(screening_date)),
+         referral_received_date = if_else(referral_received_date < "2012-01-01", NA_Date_, as_date(referral_received_date)),
+         referral_received_date = if_else(referral_received_date > "2021-10-22", NA_Date_, as_date(referral_received_date)),
+         gp_referred_date = if_else(gp_referred_date < "2012-01-01", NA_Date_, as_date(gp_referred_date)),
+         gp_referred_date = if_else(gp_referred_date > "2021-10-22", NA_Date_, as_date(gp_referred_date)),
+         future_appointment = case_when(
+                        appointment_date >= max(camhs_original$referred_date, na.rm = T) ~ 1)) %>% 
+  filter(!(is.na(referred_date) & is.na(gp_referred_date))) %>% 
+  
+  # Recalculate time periods
+  mutate(ref_to_appointment = referred_date %--% appointment_date %/% days(1),
+         ref_to_assessed = referred_date %--% assessed_date %/% days(1),
+         ref_to_rejected = referred_date %--% rejected_referral_date %/% days(1),
+         ref_to_closed = referred_date %--% assessment_closed_date %/% days(1),
+         gp_ref_to_appointment = gp_referred_date %--% appointment_date %/% days(1)) %>% 
+  
+  # Ages
+  mutate(age_at_referral = if_else(is.na(age_at_referral),
+                                   month_of_birth %--% gp_referred_date %/% years(1), as.double(age_at_referral))) %>% 
+  filter(age_at_referral != -1799 | is.na(age_at_referral))
+  
+# Keep only CPR ids and add flag
+camhs_original <- camhs_original %>%
+  mutate(referred_flag = 1,
+         year = year(referred_date)) %>% 
+  write_delim("data/camhs_full.csv", delim = ",")
+
+camhs_cpr <- camhs_original %>% 
+  filter(id %in% cpr_ids) %>%
+  filter(age_at_referral %in% c(2:17)) %>% 
+  write_delim("data/camhs_cpr.csv", delim = ",")
+```

@@ -1,0 +1,654 @@
+---
+title: "Incidence Rates"
+author: "Will Ball"
+date: "2023-02-22"
+output: html_document
+---
+
+## Library
+
+```{r}
+options(scipen = 999)
+
+library(tidyverse) #, lib.loc = "C:/Program Files/R/R-4.2.1patched/library")
+library(tidylog)
+library(vroom)
+library(janitor)
+library(lubridate)
+library(gt)
+```
+
+
+## Data
+
+```{r}
+## Population
+pop_est <- vroom("H:/DaSH520/Workspaces/Will/Tables/data/age_group_pop_est.csv") %>% 
+  filter(sex %in% c("Males","Females")) %>% # Don't need total
+  mutate(sex = factor(sex, levels = c("Males","Females"), labels = c("M", "F"))) %>% 
+  group_by(year, age_group, sex) %>% 
+  summarise(pop_size = sum(count)) # count for all council areas (i.e. for NHSG region)
+
+pop_2022 <- pop_est %>% 
+  filter(year == 2021) %>% 
+  mutate(year = 2022) # Repeat estimate for 2021 in 2022
+
+pop_est <- pop_est %>% 
+  bind_rows(pop_2022)
+
+pop_est_no_sex <- pop_est %>% 
+  group_by(year, age_group) %>% 
+  summarise(pop_size = sum(pop_size))
+
+pop_est_sex <- pop_est %>% 
+  group_by(year, sex) %>% 
+  summarise(pop_size = sum(pop_size))
+
+## CPR IDs
+cpr_ids <- vroom("H:/DaSH520/Data/Raw_Data/Release_v3_20230814/DaSH520_ACCCPR_Release_v3.txt", delim = "|") %>% 
+  clean_names() %>% 
+  rename(id = da_sh520_study_num) %>%
+  select(id) %>% 
+  group_by(id) %>%
+  slice(1) %>% 
+  pull()
+
+## CPR
+cpr <- vroom("H:/DaSH520/Workspaces/Will/Tables/data/cpr.csv")
+
+## Prescribing
+pis <- vroom("H:/DaSH520/Workspaces/Will/Tables/data/pis_full.csv") %>% 
+  rename(sex = "chi_sex") %>% 
+  mutate(cpr = case_when(
+    id %in% cpr_ids ~ 1,
+    TRUE ~ 0)) %>%
+  # Cut for age and bnf sections
+  filter(age <= 17) %>%
+  # For each person get first (i.e. new) prescription per bnf_section
+  group_by(id, bnf_section) %>% 
+  arrange(pis_date) %>% 
+  slice(1) %>% 
+  mutate(age_group = case_when(
+    age <= 4 ~ "0-4",
+    age > 4 & age <= 9 ~ "5-9",
+    age > 9 & age <= 14 ~ "10-14",
+    age > 14 ~ "15-17"),
+         age_group = ordered(age_group, levels = c("0-4","5-9","10-14","15-17")),
+         sex = factor(sex, levels = c(0,1), labels = c("F","M"))) %>% 
+  filter(pis_date < as_date("2023-01-01"))
+
+## CAMHS
+camhs <- vroom("H:/DaSH520/Workspaces/Will/Tables/data/camhs_full.csv") %>% 
+  mutate(cpr = case_when(
+    id %in% cpr_ids ~ 1,
+    TRUE ~ 0)) %>% 
+  filter(age_at_referral <= 17) %>% 
+  group_by(id) %>% 
+  arrange(referred_date) %>% 
+  slice(1) %>% 
+  mutate(age_group = case_when(
+    age_at_referral <= 4 ~ "0-4",
+    age_at_referral > 4 & age_at_referral <= 9 ~ "5-9",
+    age_at_referral > 9 & age_at_referral <= 14 ~ "10-14",
+    age_at_referral > 14 ~ "15-17"),
+         age_group = ordered(age_group, levels = c("0-4","5-9","10-14","15-17"))) %>% 
+  filter(referred_date < as_date("2023-01-01"))
+```
+
+
+## CPR Pop at risk
+
+```{r}
+## CPR pop at risk - by year, age, sex
+annual_cpr_pop_at_risk <- cpr %>% 
+  select(id, month_of_birth, sex) %>% 
+  # Get age at each year
+  mutate(year = year(month_of_birth),
+         age_2015 = 2015 - year,
+         age_2016 = 2016 - year,
+         age_2017 = 2017 - year,
+         age_2018 = 2018 - year,
+         age_2019 = 2019 - year,
+         age_2020 = 2020 - year,
+         age_2021 = 2021 - year,
+         age_2022 = 2022 - year) %>%
+  # Make long format
+  pivot_longer(cols = starts_with("age_"),
+               names_to = "age_at",
+               values_to = "age") %>% 
+  mutate(age_at = str_replace(age_at,"age_",""),
+         age_at = as.integer(age_at),
+         age = replace(age, age < 0, NA), # remove rows before people were born (i.e. not contributing years at risk of outcome)
+         age_group = case_when(
+                               age <= 4 ~ "0-4",
+                               age > 4 & age <= 9 ~ "5-9",
+                               age > 9 & age <= 14 ~ "10-14",
+                               age > 14 ~ "15-17"),
+         age_group = ordered(age_group, levels = c("0-4","5-9","10-14","15-17"))) %>%
+  filter(!is.na(age)) %>% 
+  filter(age < 18) %>% 
+  # Summarise by year, age group, sex
+  group_by(age_at, sex, age_group) %>% 
+  summarise(cpr_years_at_risk = n()) %>% 
+  mutate(sex = factor(sex, levels = c(0,1), labels = c("F","M"))) %>%  # 0 is F, 1 is M
+  rename(year = "age_at")
+
+## Populations at risk
+at_risk <- pop_est %>% 
+  left_join(annual_cpr_pop_at_risk, by = c("year", "sex", "age_group")) %>% 
+  mutate(pop_years_at_risk = pop_size - cpr_years_at_risk) %>% 
+  pivot_longer(cols = ends_with("years_at_risk"),
+               names_to = "cpr",
+               values_to = "pop_at_risk") %>% 
+  mutate(cpr = case_when(
+    cpr == "pop_years_at_risk" ~ 0,
+    cpr == "cpr_years_at_risk" ~ 1
+  ))
+
+# Population at risk no sex
+annual_cpr_pop_at_risk_no_sex <- cpr %>% 
+  select(id, month_of_birth) %>% 
+  # Get age at each year
+  mutate(year = year(month_of_birth),
+         age_2015 = 2015 - year,
+         age_2016 = 2016 - year,
+         age_2017 = 2017 - year,
+         age_2018 = 2018 - year,
+         age_2019 = 2019 - year,
+         age_2020 = 2020 - year,
+         age_2021 = 2021 - year,
+         age_2022 = 2022 - year) %>%
+  # Make long format
+  pivot_longer(cols = starts_with("age_"),
+               names_to = "age_at",
+               values_to = "age") %>% 
+  mutate(age_at = str_replace(age_at,"age_",""),
+         age_at = as.integer(age_at),
+         age = replace(age, age < 0, NA), # remove rows before people were born (i.e. not contributing years at risk of outcome)
+         age_group = case_when(
+                               age <= 4 ~ "0-4",
+                               age > 4 & age <= 9 ~ "5-9",
+                               age > 9 & age <= 14 ~ "10-14",
+                               age > 14 ~ "15-17"),
+         age_group = ordered(age_group, levels = c("0-4","5-9","10-14","15-17"))) %>%
+  filter(!is.na(age)) %>% 
+  filter(age < 18) %>% 
+  # Summarise by year, age group, sex
+  group_by(age_at, age_group) %>% 
+  summarise(cpr_years_at_risk = n()) %>%
+  rename(year = "age_at")
+
+# At risk - age group
+at_risk_no_sex <- pop_est_no_sex %>% 
+  left_join(annual_cpr_pop_at_risk_no_sex, by = c("year", "age_group")) %>% 
+  mutate(pop_years_at_risk = pop_size - cpr_years_at_risk) %>% 
+  pivot_longer(cols = ends_with("years_at_risk"),
+               names_to = "cpr",
+               values_to = "pop_at_risk") %>% 
+  mutate(cpr = case_when(
+    cpr == "pop_years_at_risk" ~ 0,
+    cpr == "cpr_years_at_risk" ~ 1
+  ))
+
+# Population at risk sex
+annual_cpr_pop_at_risk_sex <- cpr %>% 
+  select(id, month_of_birth, sex) %>% 
+  # Get age at each year
+  mutate(year = year(month_of_birth),
+         age_2015 = 2015 - year,
+         age_2016 = 2016 - year,
+         age_2017 = 2017 - year,
+         age_2018 = 2018 - year,
+         age_2019 = 2019 - year,
+         age_2020 = 2020 - year,
+         age_2021 = 2021 - year,
+         age_2022 = 2022 - year) %>%
+  # Make long format
+  pivot_longer(cols = starts_with("age_"),
+               names_to = "age_at",
+               values_to = "age") %>% 
+  mutate(age_at = str_replace(age_at,"age_",""),
+         age_at = as.integer(age_at),
+         age = replace(age, age < 0, NA), # remove rows before people were born (i.e. not contributing years at risk of outcome)
+         age_group = case_when(
+                               age <= 4 ~ "0-4",
+                               age > 4 & age <= 9 ~ "5-9",
+                               age > 9 & age <= 14 ~ "10-14",
+                               age > 14 ~ "15-17"),
+         age_group = ordered(age_group, levels = c("0-4","5-9","10-14","15-17"))) %>%
+  filter(!is.na(age)) %>% 
+  filter(age < 18) %>% 
+  # Summarise by year, age group, sex
+  group_by(age_at, sex) %>% 
+  summarise(cpr_years_at_risk = n()) %>% 
+  mutate(sex = factor(sex, levels = c(0,1), labels = c("F","M"))) %>%  # 0 is F, 1 is M
+  rename(year = "age_at")
+
+# At risk - sex
+at_risk_sex <- pop_est_sex %>% 
+  left_join(annual_cpr_pop_at_risk_sex, by = c("year", "sex")) %>% 
+  mutate(pop_years_at_risk = pop_size - cpr_years_at_risk) %>% 
+  pivot_longer(cols = ends_with("years_at_risk"),
+               names_to = "cpr",
+               values_to = "pop_at_risk") %>% 
+  mutate(cpr = case_when(
+    cpr == "pop_years_at_risk" ~ 0,
+    cpr == "cpr_years_at_risk" ~ 1
+  ))
+```
+
+
+## Tables
+
+incidence rate = (n new registrations / (population at risk * time frame))
+
+e.g. 
+      (2000 new CAMHS referrals)/(80,000 kids * 1 year)
+      (2000 new CAMHS referrals)/(80,000 people-years)
+      = 0.025 cases/people-year
+      = 25 cases/1,000 people-years
+      
+      "if you watch 1,000 people for a year you expect to see 25 new cases"
+
+For age groups and gender
+
+dataset needs to have:
+
+year | age group | gender | new registrations | population size | population with outcome already | population at risk
+
+1. Summarise new registrations by year, age group and gender
+2. Summarise population size by year, age group and gender
+
+
+# CAMHS - sex and age group
+
+```{r}
+rm(annual_cpr_pop_at_risk, pop_2022, pop_est)
+
+# CAMHS
+tab1 <- camhs %>% 
+  filter(year >= 2015) %>%
+  filter(sex %in% c("M","F")) %>%
+  select(id, year, age_group, sex, cpr) %>% 
+  group_by(year, age_group, sex, cpr) %>% 
+  summarise(new_refs = n()) %>% 
+  left_join(at_risk, by = c("year", "age_group", "sex", "cpr")) %>% 
+  mutate(incidence = new_refs / pop_at_risk,
+         incidence_1000_peopleyears = new_refs / pop_at_risk * 1000)
+
+tab2 <- tab1 %>% 
+  group_by(age_group, sex, cpr) %>% 
+  summarise(new_refs = sum(new_refs),
+            pop_at_risk = sum(pop_at_risk)) %>% 
+  mutate(incidence = new_refs / pop_at_risk,
+         incidence_1000_peopleyears = new_refs / pop_at_risk * 1000,
+         age_group = ordered(age_group, levels = c("0-4","5-9","10-14","15-17")),
+         cpr = as.factor(cpr)) %>%
+  arrange(age_group) %>% 
+  write_delim('camhs_incidence.csv', delim = ",")
+
+tab2 %>% 
+  ggplot(aes(x = age_group, y = incidence_1000_peopleyears, fill = cpr, group = cpr)) +
+  geom_bar(position = "dodge", stat = "identity") +
+  scale_y_continuous(limits = c(0,NA), breaks = scales::pretty_breaks(10)) +
+  facet_wrap(~sex) +
+  labs(title = "CAMHS") +
+  theme_classic()
+```
+
+# CAMHS - age group
+
+```{r}
+# Overall - age group
+tab3 <- camhs %>% 
+  filter(year >= 2015) %>%
+  select(id, year, age_group, cpr) %>% 
+  group_by(year, age_group, cpr) %>% 
+  summarise(new_refs = n()) %>% 
+  left_join(at_risk_no_sex, by = c("year", "age_group", "cpr")) %>% 
+  mutate(incidence = new_refs / pop_at_risk,
+         incidence_1000_peopleyears = new_refs / pop_at_risk * 1000)
+
+tab4 <- tab3 %>% 
+  group_by(age_group, cpr) %>% 
+  summarise(new_refs = sum(new_refs),
+            pop_at_risk = sum(pop_at_risk)) %>% 
+  mutate(incidence = new_refs / pop_at_risk,
+         incidence_1000_peopleyears = new_refs / pop_at_risk * 1000,
+         age_group = ordered(age_group, levels = c("0-4","5-9","10-14","15-17")),
+         cpr = as.factor(cpr)) %>%
+  arrange(age_group) %>% 
+  write_delim('camhs_incidence_agegroup.csv', delim = ",")
+
+tab4 %>% 
+  ggplot(aes(x = age_group, y = incidence_1000_peopleyears, colour = cpr, group = cpr)) +
+  geom_point() +
+  geom_line() +
+  scale_y_continuous(limits = c(0,NA), breaks = scales::pretty_breaks(10)) +
+  labs(title = "CAMHS") +
+  theme_classic()
+```
+
+# CAMHS - sex
+
+```{r}
+# Overall - age group
+tab3 <- camhs %>% 
+  filter(year >= 2015) %>%
+  select(id, year, sex, cpr) %>% 
+  group_by(year, sex, cpr) %>% 
+  summarise(new_refs = n()) %>% 
+  left_join(at_risk_sex, by = c("year", "sex", "cpr")) %>% 
+  mutate(incidence = new_refs / pop_at_risk,
+         incidence_1000_peopleyears = new_refs / pop_at_risk * 1000)
+
+tab4 <- tab3 %>% 
+  group_by(sex, cpr) %>% 
+  summarise(new_refs = sum(new_refs),
+            pop_at_risk = sum(pop_at_risk)) %>% 
+  filter(!sex == "U") %>% 
+  mutate(incidence = new_refs / pop_at_risk,
+         incidence_1000_peopleyears = new_refs / pop_at_risk * 1000,
+         cpr = as.factor(cpr)) %>%
+  arrange(sex) %>% 
+  write_delim('camhs_incidence_sex.csv', delim = ",")
+
+tab4 %>% 
+  ggplot(aes(x = cpr, y = incidence_1000_peopleyears, fill = sex, group = sex)) +
+  geom_bar(position = "dodge", stat = "identity") +
+  scale_y_continuous(limits = c(0,NA), breaks = scales::pretty_breaks(10)) +
+  labs(title = "CAMHS") +
+  theme_classic()
+```
+
+# PIS
+
+```{r}
+# MH Prescriptions
+tab_pres <- pis %>% 
+  filter(year >= 2015) %>%
+  filter(sex %in% c("M","F")) %>%
+  select(id, year, age_group, sex, cpr) %>% 
+  group_by(year, age_group, sex, cpr) %>% 
+  summarise(new_scripts = n()) %>% 
+  left_join(at_risk, by = c("year", "age_group", "sex", "cpr")) %>% 
+  mutate(incidence = new_scripts / pop_at_risk,
+         incidence_1000_peopleyears = new_scripts / pop_at_risk * 1000)
+
+tab_pres_overall <- tab_pres %>% 
+  group_by(age_group, cpr, sex) %>%  # Removed sex to bring up cell counts
+  summarise(new_scripts = sum(new_scripts),
+            pop_at_risk = sum(pop_at_risk)) %>% 
+  mutate(incidence = new_scripts / pop_at_risk,
+         incidence_1000_peopleyears = new_scripts / pop_at_risk * 1000,
+         age_group = ordered(age_group, levels = c("0-4","5-9","10-14","15-17")),
+         cpr = as.factor(cpr)) %>%
+  arrange(age_group) %>% 
+  # Drop rows with <5 new prescriptions
+  filter(new_scripts >= 5) %>% 
+  write_delim('prescriptions_incidence.csv', delim = ",")
+
+tab_pres_overall %>% 
+  ggplot(aes(x = age_group, y = incidence_1000_peopleyears, fill = cpr, group = cpr)) +
+  geom_bar(position = "dodge", stat = "identity") +
+  scale_y_continuous(limits = c(0,NA), breaks = scales::pretty_breaks(10)) +
+  facet_wrap(~sex) +
+  labs(title = "Prescriptions") +
+  theme_classic()
+
+## ADHD
+tab_adhd <- pis %>% 
+  filter(bnf_section == "0404") %>% 
+  filter(year >= 2015) %>%
+  filter(sex %in% c("M","F")) %>%
+  select(id, year, age_group, sex, cpr) %>% 
+  group_by(year, age_group, sex, cpr) %>% 
+  summarise(new_scripts = n()) %>% 
+  left_join(at_risk, by = c("year", "age_group", "sex", "cpr")) %>% 
+  mutate(incidence = new_scripts / pop_at_risk,
+         incidence_1000_peopleyears = new_scripts / pop_at_risk * 1000)
+
+tab_adhd_overall <- tab_adhd %>% 
+  group_by(age_group, cpr, sex) %>% 
+  summarise(new_scripts = sum(new_scripts),
+            pop_at_risk = sum(pop_at_risk)) %>% 
+  mutate(incidence = new_scripts / pop_at_risk,
+         incidence_1000_peopleyears = new_scripts / pop_at_risk * 1000,
+         age_group = ordered(age_group, levels = c("0-4","5-9","10-14","15-17")),
+         cpr = as.factor(cpr)) %>%
+  arrange(age_group) %>% 
+  # Drop rows with <5 new prescriptions
+  filter(new_scripts >= 5) %>% 
+  write_delim('adhd_incidence.csv', delim = ",")
+
+tab_adhd_overall %>% 
+  ggplot(aes(x = age_group, y = incidence_1000_peopleyears, fill = cpr, group = cpr)) +
+  geom_bar(position = "dodge", stat = "identity") +
+  scale_y_continuous(limits = c(0,NA), breaks = scales::pretty_breaks(10)) +
+  facet_wrap(~sex) +
+  labs(title = "ADHD") +
+  theme_classic()
+
+# Antidep
+tab_antidep <- pis %>% 
+  filter(bnf_section == "0403") %>% 
+  filter(year >= 2015) %>%
+  filter(sex %in% c("M","F")) %>%
+  select(id, year, age_group, sex, cpr) %>% 
+  group_by(year, age_group, sex, cpr) %>% 
+  summarise(new_scripts = n()) %>% 
+  left_join(at_risk, by = c("year", "age_group", "sex", "cpr")) %>% 
+  mutate(incidence = new_scripts / pop_at_risk,
+         incidence_1000_peopleyears = new_scripts / pop_at_risk * 1000)
+
+tab_antidep_overall <- tab_antidep %>% 
+  group_by(age_group, cpr, sex) %>% 
+  summarise(new_scripts = sum(new_scripts),
+            pop_at_risk = sum(pop_at_risk)) %>% 
+  mutate(incidence = new_scripts / pop_at_risk,
+         incidence_1000_peopleyears = new_scripts / pop_at_risk * 1000,
+         age_group = ordered(age_group, levels = c("0-4","5-9","10-14","15-17")),
+         cpr = as.factor(cpr)) %>%
+  arrange(age_group) %>% 
+  # Drop rows with <5 new prescriptions
+  filter(new_scripts >= 5) %>% 
+  write_delim('antidep_incidence.csv', delim = ",")
+
+tab_antidep_overall %>% 
+  ggplot(aes(x = age_group, y = incidence_1000_peopleyears, fill = cpr, group = cpr)) +
+  geom_bar(position = "dodge", stat = "identity") +
+  scale_y_continuous(limits = c(0,NA), breaks = scales::pretty_breaks(10)) +
+  facet_wrap(~sex) +
+  labs(title = "Antidep") +
+  theme_classic()
+```
+
+# PIS - Age Group
+
+```{r}
+# Prescriptions Overall - age group
+tab_pres1 <- pis %>% 
+  filter(year >= 2015) %>%
+  select(id, year, age_group, cpr) %>% 
+  group_by(year, age_group, cpr) %>% 
+  summarise(new_scripts = n()) %>% 
+  left_join(at_risk_no_sex, by = c("year", "age_group", "cpr")) %>% 
+  mutate(incidence = new_scripts / pop_at_risk,
+         incidence_1000_peopleyears = new_scripts / pop_at_risk * 1000)
+
+tab_pres_overall1 <- tab_pres1 %>% 
+  group_by(age_group, cpr) %>%  # Removed sex to bring up cell counts
+  summarise(new_scripts = sum(new_scripts),
+            pop_at_risk = sum(pop_at_risk)) %>% 
+  mutate(incidence = new_scripts / pop_at_risk,
+         incidence_1000_peopleyears = new_scripts / pop_at_risk * 1000,
+         age_group = ordered(age_group, levels = c("0-4","5-9","10-14","15-17")),
+         cpr = as.factor(cpr)) %>%
+  arrange(age_group) %>% 
+  # Drop rows with <5 new prescriptions
+  filter(new_scripts >= 5) %>% 
+  write_delim('prescriptions_incidence_agegroup.csv', delim = ",")
+
+tab_pres_overall1 %>% 
+  ggplot(aes(x = age_group, y = incidence_1000_peopleyears, fill = cpr, group = cpr)) +
+  geom_bar(position = "dodge", stat = "identity") +
+  scale_y_continuous(limits = c(0,NA), breaks = scales::pretty_breaks(10)) +
+  labs(title = "Prescriptions") +
+  theme_classic()
+
+# ADHD Overall - age group
+tab_adhd1 <- pis %>% 
+  filter(bnf_section == "0404") %>% 
+  filter(year >= 2015) %>%
+  select(id, year, age_group, cpr) %>% 
+  group_by(year, age_group, cpr) %>% 
+  summarise(new_scripts = n()) %>% 
+  left_join(at_risk_no_sex, by = c("year", "age_group", "cpr")) %>% 
+  mutate(incidence = new_scripts / pop_at_risk,
+         incidence_1000_peopleyears = new_scripts / pop_at_risk * 1000)
+
+tab_adhd_overall1 <- tab_adhd1 %>% 
+  group_by(age_group, cpr) %>% 
+  summarise(new_scripts = sum(new_scripts),
+            pop_at_risk = sum(pop_at_risk)) %>% 
+  mutate(incidence = new_scripts / pop_at_risk,
+         incidence_1000_peopleyears = new_scripts / pop_at_risk * 1000,
+         age_group = ordered(age_group, levels = c("0-4","5-9","10-14","15-17")),
+         cpr = as.factor(cpr)) %>%
+  arrange(age_group) %>% 
+  # Drop rows with <5 new prescriptions
+  filter(new_scripts >= 5) %>% 
+  write_delim('adhd_incidence_agegroup.csv', delim = ",")
+
+tab_adhd_overall1 %>% 
+  ggplot(aes(x = age_group, y = incidence_1000_peopleyears, fill = cpr, group = cpr)) +
+  geom_bar(position = "dodge", stat = "identity") +
+  scale_y_continuous(limits = c(0,NA), breaks = scales::pretty_breaks(10)) +
+  labs(title = "ADHD") +
+  theme_classic()
+
+# Antidep Overall - Age group
+tab_antidep1 <- pis %>% 
+  filter(bnf_section == "0403") %>% 
+  filter(year >= 2015) %>%
+  select(id, year, age_group, cpr) %>% 
+  group_by(year, age_group, cpr) %>% 
+  summarise(new_scripts = n()) %>% 
+  left_join(at_risk_no_sex, by = c("year", "age_group", "cpr")) %>% 
+  mutate(incidence = new_scripts / pop_at_risk,
+         incidence_1000_peopleyears = new_scripts / pop_at_risk * 1000)
+
+tab_antidep_overall1 <- tab_antidep1 %>% 
+  group_by(age_group, cpr) %>% 
+  summarise(new_scripts = sum(new_scripts),
+            pop_at_risk = sum(pop_at_risk)) %>% 
+  mutate(incidence = new_scripts / pop_at_risk,
+         incidence_1000_peopleyears = new_scripts / pop_at_risk * 1000,
+         age_group = ordered(age_group, levels = c("0-4","5-9","10-14","15-17")),
+         cpr = as.factor(cpr)) %>%
+  arrange(age_group) %>% 
+  # Drop rows with <5 new prescriptions
+#  filter(new_scripts >= 5) %>% 
+  write_delim('antidep_incidence_agegroup.csv', delim = ",")
+
+tab_antidep_overall1 %>% 
+  ggplot(aes(x = age_group, y = incidence_1000_peopleyears, fill = cpr, group = cpr)) +
+  geom_bar(position = "dodge", stat = "identity") +
+  scale_y_continuous(limits = c(0,NA), breaks = scales::pretty_breaks(10)) +
+  labs(title = "Antidep") +
+  theme_classic()
+```
+
+# PIS - Sex
+
+```{r}
+# Overall - age group
+tab1 <- pis %>% 
+  filter(year >= 2015) %>%
+  select(id, year, sex, cpr) %>% 
+  group_by(year, sex, cpr) %>% 
+  summarise(new_scripts = n()) %>% 
+  left_join(at_risk_sex, by = c("year", "sex", "cpr")) %>% 
+  mutate(incidence = new_scripts / pop_at_risk,
+         incidence_1000_peopleyears = new_scripts / pop_at_risk * 1000)
+
+tab2 <- tab1 %>% 
+  group_by(sex, cpr) %>% 
+  summarise(new_refs = sum(new_scripts),
+            pop_at_risk = sum(pop_at_risk)) %>% 
+  filter(!sex == "U") %>% 
+  mutate(incidence = new_refs / pop_at_risk,
+         incidence_1000_peopleyears = new_refs / pop_at_risk * 1000,
+         cpr = as.factor(cpr)) %>%
+  arrange(sex) %>% 
+  write_delim('prescriptions_incidence_sex.csv', delim = ",")
+
+tab2 %>% 
+  ggplot(aes(x = cpr, y = incidence_1000_peopleyears, fill = sex, group = sex)) +
+  geom_bar(position = "dodge", stat = "identity") +
+  scale_y_continuous(limits = c(0,NA), breaks = scales::pretty_breaks(10)) +
+  labs(title = "PIS") +
+  theme_classic()
+
+# ADHD Overall - sex
+tab_adhd1 <- pis %>% 
+  filter(bnf_section == "0404") %>% 
+  filter(year >= 2015) %>%
+  select(id, year, sex, cpr) %>% 
+  group_by(year, sex, cpr) %>% 
+  summarise(new_scripts = n()) %>% 
+  left_join(at_risk_sex, by = c("year", "sex", "cpr")) %>% 
+  mutate(incidence = new_scripts / pop_at_risk,
+         incidence_1000_peopleyears = new_scripts / pop_at_risk * 1000)
+
+tab_adhd_overall1 <- tab_adhd1 %>% 
+  group_by(sex, cpr) %>% 
+  summarise(new_refs = sum(new_scripts),
+            pop_at_risk = sum(pop_at_risk)) %>% 
+  filter(!sex == "U") %>% 
+  mutate(incidence = new_refs / pop_at_risk,
+         incidence_1000_peopleyears = new_refs / pop_at_risk * 1000,
+         cpr = as.factor(cpr)) %>%
+  arrange(sex) %>%
+  # Drop rows with <5 new prescriptions
+#  filter(new_scripts >= 5) %>% 
+  write_delim('adhd_incidence_sex.csv', delim = ",")
+
+tab_adhd_overall1 %>% 
+  ggplot(aes(x = cpr, y = incidence_1000_peopleyears, fill = sex, group = sex)) +
+  geom_bar(position = "dodge", stat = "identity") +
+  scale_y_continuous(limits = c(0,NA), breaks = scales::pretty_breaks(10)) +
+  labs(title = "ADHD") +
+  theme_classic()
+
+# Antidep Overall - Age group
+tab_antidep1 <- pis %>% 
+  filter(bnf_section == "0403") %>% 
+  filter(year >= 2015) %>%
+  select(id, year, sex, cpr) %>% 
+  group_by(year, sex, cpr) %>% 
+  summarise(new_scripts = n()) %>% 
+  left_join(at_risk_sex, by = c("year", "sex", "cpr")) %>% 
+  mutate(incidence = new_scripts / pop_at_risk,
+         incidence_1000_peopleyears = new_scripts / pop_at_risk * 1000)
+
+tab_antidep_overall1 <- tab_antidep1 %>% 
+  group_by(sex, cpr) %>% 
+  summarise(new_refs = sum(new_scripts),
+            pop_at_risk = sum(pop_at_risk)) %>% 
+  filter(!sex == "U") %>% 
+  mutate(incidence = new_refs / pop_at_risk,
+         incidence_1000_peopleyears = new_refs / pop_at_risk * 1000,
+         cpr = as.factor(cpr)) %>%
+  arrange(sex) %>% 
+  # Drop rows with <5 new prescriptions
+#  filter(new_scripts >= 5) %>% 
+  write_delim('antidep_incidence_sex.csv', delim = ",")
+
+tab_antidep_overall1 %>% 
+  ggplot(aes(x = cpr, y = incidence_1000_peopleyears, fill = sex, group = sex)) +
+  geom_bar(position = "dodge", stat = "identity") +
+  scale_y_continuous(limits = c(0,NA), breaks = scales::pretty_breaks(10)) +
+  labs(title = "Antidep") +
+  theme_classic()
+```

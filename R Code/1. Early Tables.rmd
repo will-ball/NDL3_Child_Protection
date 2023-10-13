@@ -1,0 +1,403 @@
+---
+title: "Early Tables"
+author: "Will Ball"
+date: "2023-01-26"
+output: html_document
+---
+
+Data Version 3
+
+## Libs
+
+```{r, message=F}
+library(tidyverse, lib.loc = "H:/DaSH520/R Library") #, lib.loc = "C:/Program Files/R/R-4.2.1patched/library")
+library(tidylog)
+library(vroom)
+library(janitor)
+library(lubridate)
+library(data.table)
+library(skimr)
+library(scales)
+library(gt) #, lib.loc = "C:/Users/DaSH520_s01wb1/AppData/Local/R/win-library/4.2")
+
+options(scipen = 999)
+```
+
+## Data
+
+```{r, message=F}
+cpr <- vroom("H:/DaSH520/Data/Raw_Data/Release_v3_20230814/DaSH520_ACCCPR_Release_v3.txt", delim = "|") %>% 
+  clean_names() %>% 
+  rename(id = da_sh520_study_num,
+         registered = date_registered,
+         removed = date_de_registered) %>% 
+  mutate(age_at_reg = month_of_birth %--% registered %/% years(1),
+         age_at_rem = month_of_birth %--% removed %/% years(1),
+         days_on_reg = registered %--% removed %/% days(1),
+         year_reg = year(registered),
+         year_rem = year(removed),
+         sex = if_else(chi_matched_flag == 0, NA_real_, sex),
+         pre_birth = if_else(registered <= month_of_birth, 1, 0)) %>%  # Careful with this as DoB has been floored to MoB
+  filter(registered >= as_date("2012-01-01"))
+```
+
+## CPR IDs
+
+```{r}
+cpr_ids <- vroom("H:/DaSH520/Data/Raw_Data/Release_v3_20230814/DaSH520_ACCCPR_Release_v3.txt", delim = "|") %>% 
+  clean_names() %>% 
+  rename(id = da_sh520_study_num) %>%
+  filter(date_registered >= as_date("2012-01-01")) %>% 
+  select(id) %>% 
+  group_by(id) %>%
+  slice(1) %>% 
+  pull()
+```
+
+## Table 1 - Proportion seeded & demographic differences between CHI-seeded and not
+## Table 2 - Age, sex and CHI-seeded distributions + time on the register
+
+```{r }
+## Overall Row
+overall_row <- cpr %>% 
+  dplyr::mutate(under_1 = case_when(age_at_reg < 1 ~ 1),
+                over_10 = case_when(age_at_reg > 10 ~ 1)) %>% 
+  summarise('Year' = "Total",
+            'Registrations' = n(),
+            'Individuals' = n_distinct(id),
+            'Median Age' = median(age_at_reg, na.rm = T),
+            'Pre-birth' = sum(pre_birth == 1, na.rm = T),
+            'Pre-birth (%)' = round((sum(pre_birth, na.rm = T) / n()) * 100),
+            'Under 1' = sum(under_1, na.rm = T),
+            'Under 1 (%)' = round((sum(under_1, na.rm = T) / n()) * 100),
+            'Over 10' = sum(over_10, na.rm = T),
+            'Over 10 (%)' = round((sum(over_10, na.rm = T) / n()) * 100),
+            Girls = sum(sex == 0, na.rm = T),
+            'Girls (%)' = round((1 - sum(sex, na.rm = T) / n()) * 100), # 0 is female, 1 is male
+            'CHI Seeded' = sum(chi_matched_flag == 1, na.rm = T),
+            'CHI Seeded (%)' = round((sum(chi_matched_flag) / n()) * 100),
+            'Quartile 1' = round(quantile(days_on_reg, probs = .25, na.rm = T)),
+            'Median' = round(median(days_on_reg, na.rm = T)),
+            'Quartile 3' = round(quantile(days_on_reg, probs = .75, na.rm = T))) %>% 
+  mutate_if(is.numeric, round, 1)
+
+## By Year
+cpr %>% 
+  dplyr::mutate(under_1 = case_when(age_at_reg < 1 ~ 1),
+                over_10 = case_when(age_at_reg > 10 ~ 1)) %>% 
+  group_by(year_reg) %>% 
+  summarise('Registrations' = n(),
+            'Individuals' = n_distinct(id),
+            'Median Age' = median(age_at_reg, na.rm = T),
+            'Pre-birth' = sum(pre_birth == 1, na.rm = T),
+            'Pre-birth (%)' = round((sum(pre_birth, na.rm = T) / n()) * 100),
+            'Under 1' = sum(under_1, na.rm = T),
+            'Under 1 (%)' = round((sum(under_1, na.rm = T) / n()) * 100),
+            'Over 10' = sum(over_10, na.rm = T),
+            'Over 10 (%)' = round((sum(over_10, na.rm = T) / n()) * 100),
+            Girls = sum(sex == 0, na.rm = T),
+            'Girls (%)' = round((1 - sum(sex, na.rm = T) / n()) * 100), # 0 is female, 1 is male
+            'CHI Seeded' = sum(chi_matched_flag == 1, na.rm = T),
+            'CHI Seeded (%)' = round((sum(chi_matched_flag) / n()) * 100),
+            'Quartile 1' = round(quantile(days_on_reg, probs = .25, na.rm = T)),
+            'Median' = round(median(days_on_reg, na.rm = T)),
+            'Quartile 3' = round(quantile(days_on_reg, probs = .75, na.rm = T))) %>%
+  rename('Year' = year_reg) %>%
+  mutate_if(is.numeric, round, 1) %>%
+  rbind(., overall_row) %>%
+  gt() %>% 
+  tab_header(
+    title = "Annual Summary of the Aberdeen City Council Child Protection Register"
+  ) %>% 
+  tab_spanner(
+    label = 'Time on Register (Days)',
+    columns = c('Quartile 1', 'Median', 'Quartile 3')
+  ) %>% 
+gtsave("table1.docx")
+
+## By Chi linkage
+cpr %>% 
+  dplyr::mutate(under_1 = case_when(age_at_reg < 1 ~ 1),
+                over_10 = case_when(age_at_reg > 10 ~ 1)) %>%
+  group_by(id) %>% 
+  slice_min(registered) %>%                          # Gives first registration for each person 
+  group_by(chi_matched_flag) %>% 
+  summarise('Individuals' = n_distinct(id),
+            'Mean Age (Years)' = round(mean(age_at_reg, na.rm = T), 1),
+            'Median Age (Years)' = median(age_at_reg, na.rm = T),
+            'Pre-birth' = sum(pre_birth == 1, na.rm = T),
+            'Pre-birth (%)' = round((sum(pre_birth, na.rm = T) / n()) * 100),
+            'Under 1' = sum(under_1, na.rm = T),
+            'Under 1 (%)' = round((sum(under_1, na.rm = T) / n()) * 100),
+            'Over 10' = sum(over_10, na.rm = T),
+            'Over 10 (%)' = round((sum(over_10, na.rm = T) / n()) * 100),
+            'Quartile 1' = round(quantile(days_on_reg, probs = .25, na.rm = T)),
+            'Median' = round(median(days_on_reg, na.rm = T)),
+            'Quartile 3' = round(quantile(days_on_reg, probs = .75, na.rm = T))) %>%
+  rename('CHI Matched' = chi_matched_flag) %>% 
+  gt() %>% 
+  tab_header(
+    title = "Summary of CHI-matched and -unmatched records for first registration on ACCCPR"
+  ) %>% 
+  tab_spanner(
+    label = 'Time on Register (Days)',
+    columns = c('Quartile 1', 'Median', 'Quartile 3')
+  ) %>% 
+gtsave("table2.docx")
+
+# Density Plots
+cpr %>% 
+  filter(age_at_reg < 18) %>%
+  mutate(chi_matched_flag = as.factor(chi_matched_flag)) %>% 
+  group_by(id) %>% 
+  arrange(registered) %>% 
+  slice(1) %>% 
+  ggplot(aes(x = age_at_reg, group = chi_matched_flag, fill = chi_matched_flag)) +
+  geom_density(adjust = 1.5, alpha = .4) +
+  theme_classic()
+
+cpr %>% 
+  filter(age_at_reg < 18) %>%
+  mutate(chi_matched_flag = as.factor(chi_matched_flag)) %>% 
+  group_by(id) %>% 
+  arrange(registered) %>% 
+  slice(1) %>% 
+  ggplot(aes(x = days_on_reg, group = chi_matched_flag, fill = chi_matched_flag)) +
+  geom_density(adjust = 1.5, alpha = .4) +
+  theme_classic()
+
+## Length of time
+cpr %>% 
+  ggplot(aes(x = days_on_reg, group = year_reg, fill = year_reg)) +
+  geom_density(adjust = 1.5, alpha = .4) +
+  facet_wrap(~year_reg, ncol = 2) +
+  theme_classic()
+
+cpr %>% 
+  filter(age_at_reg < 18) %>%
+  mutate(chi_matched_flag = as.factor(chi_matched_flag)) %>% 
+  group_by(id) %>% 
+  arrange(registered) %>% 
+  slice(1) %>%
+  ggplot(aes(x = days_on_reg, group = chi_matched_flag, fill = chi_matched_flag)) +
+  geom_density(adjust = 1.5, alpha = .4) +
+  facet_wrap(~year_reg, ncol = 2) +
+  theme_classic()
+
+rm(overall_row)
+
+## Pre-birth
+cpr %>% 
+  group_by(chi_matched_flag) %>% 
+  summarise(registrations = n(),
+            individuals = n_distinct(id),
+            pre_birth = sum(pre_birth == 1, na.rm = T),
+            pre_birth_prop = round((sum(pre_birth, na.rm = T) / n()) * 100))
+```
+
+## Plots
+
+```{r}
+cpr %>% 
+  mutate(year_born = year(month_of_birth)) %>%
+  filter(!year_born == "1900") %>% 
+  ggplot(aes(x = registered, y = month_of_birth, colour = age_at_reg)) +
+  geom_point() +
+  viridis::scale_colour_viridis() +
+  theme_classic()
+
+# Over time
+cpr %>% 
+  mutate(year_born = year(month_of_birth)) %>%
+  filter(!year_born == "1900") %>%  
+  group_by(year_born) %>%
+  summarise(individuals = n_distinct(id)) %>% 
+  ggplot(aes(x = year_born, y = individuals)) +
+  geom_bar(stat = "identity") +
+  theme_classic()
+```
+
+## Table 3 - Prevalence over time of prescribing (ADHD + Antidep) and referrals by year of 1st registration
+
+```{r}
+# PIS
+pis_cpr <- vroom("H:/DaSH520/Workspaces/Will/Tables/data/pis_cpr.csv")
+
+## Overall
+overall_row <- pis_cpr %>% 
+  select(id, prescription_flag, adhd_flag, antidep_flag) %>%
+  # Get single row for each id with single flag for each type of medication (rather than multiple id rows w/ diff flags)
+  group_by(id) %>%
+  summarise(prescription_flag = max(prescription_flag),  
+            adhd_flag = max(adhd_flag),
+            antidep_flag = max(antidep_flag)) %>% 
+  # Ungroup and count for whole group
+  ungroup() %>% 
+  summarise(year_reg = "Total",
+            individuals = n_distinct(cpr_ids),
+            n_pres = sum(prescription_flag),
+            prop_pres = round((n_pres / individuals) * 100, 1),
+            n_adhd = sum(adhd_flag),
+            prop_adhd = round((n_adhd / individuals) * 100, 1),
+            n_antidep = sum(antidep_flag),
+            prop_antidep = round((n_antidep / individuals) * 100, 1))
+
+## By Year - first year on reg for each individual id
+cpr_dates <- cpr %>%
+  group_by(id) %>% 
+  mutate(year_reg = min(year_reg)) %>% 
+  select(id, year_reg) %>% 
+  slice(1)
+
+# Counts per year
+cpr_annual <- cpr %>%
+  group_by(year_reg) %>% 
+  summarise(individuals = n_distinct(id))
+
+pis_tab <- pis_cpr %>%
+  left_join(cpr_dates, by = "id") %>% 
+  group_by(year_reg, id) %>%
+  summarise(prescription_flag = max(prescription_flag),  
+            adhd_flag = max(adhd_flag),
+            antidep_flag = max(antidep_flag)) %>% 
+  # Ungroup and count for whole group by year
+  ungroup() %>% 
+  group_by(year_reg) %>% 
+  summarise(n_pres = sum(prescription_flag),
+            n_adhd = sum(adhd_flag),
+            n_antidep = sum(antidep_flag)) %>% 
+  right_join(cpr_annual, by = "year_reg") %>% 
+  mutate(prop_pres = round((n_pres / individuals) * 100, 1),
+         prop_adhd = round((n_adhd / individuals) * 100, 1),
+         prop_antidep = round((n_antidep / individuals) * 100, 1)) %>% 
+  select(year_reg, individuals, n_pres, prop_pres, n_adhd, prop_adhd, n_antidep, prop_antidep) %>%
+  rbind(., overall_row)
+
+## Grouped Years
+overall_row2 <- overall_row %>% 
+  rename(year_grp = year_reg) %>% 
+  mutate(per_year = round(individuals / 11)) %>% 
+  select(year_grp, individuals, per_year, n_pres, prop_pres, n_adhd, prop_adhd, n_antidep, prop_antidep)
+
+cpr_grouped <- cpr %>% 
+  mutate(year_grp = case_when(
+    year_reg < 2017 ~ "2012 - 2016",
+    year_reg >= 2017 ~ "2017 - 2022")) %>% 
+  group_by(year_grp) %>% 
+  summarise(years = n_distinct(year_reg),
+            individuals = n_distinct(id),
+            per_year = round(individuals / years)) %>% 
+  select(!years)
+
+pis_cpr %>%
+  left_join(cpr_dates, by = "id") %>% 
+  mutate(year_grp = case_when(
+    year_reg < 2017 ~ "2012 - 2016",
+    year_reg >= 2017 ~ "2017 - 2022")) %>%  
+  group_by(year_grp, id) %>%
+  summarise(prescription_flag = max(prescription_flag),  
+            adhd_flag = max(adhd_flag),
+            antidep_flag = max(antidep_flag)) %>% 
+  # Ungroup and count for whole group by year
+  ungroup() %>% 
+  group_by(year_grp) %>% 
+  summarise(n_pres = sum(prescription_flag),
+            n_adhd = sum(adhd_flag),
+            n_antidep = sum(antidep_flag)) %>% 
+  right_join(cpr_grouped, by = "year_grp") %>% 
+  mutate(prop_pres = round((n_pres / individuals) * 100, 1),
+         prop_adhd = round((n_adhd / individuals) * 100, 1),
+         prop_antidep = round((n_antidep / individuals) * 100, 1)) %>% 
+  select(year_grp, individuals, per_year, n_pres, prop_pres, n_adhd, prop_adhd, n_antidep, prop_antidep) %>%
+  rbind(., overall_row2)  %>% 
+  gt() %>% 
+  tab_header(
+    title = "Prevalence of Mental Health Prescriptions and CAMHS Referrals for Children on the Child Protection Register (by year of first registration)"
+  ) %>% 
+ gtsave("table4.docx")
+
+## CAMHS
+camhs_cpr <- vroom("H:/DaSH520/Workspaces/Will/Tables/data/camhs_cpr.csv")
+
+camhs_cpr %>% 
+  summarise(individuals = n_distinct(id))
+
+overall_row3 <- camhs_cpr %>% 
+  select(id, referred_flag, referred_date) %>%
+  # Get single row for each id with single flag for each type of medication (rather than multiple id rows w/ diff flags)
+  group_by(id, referred_date) %>%
+  arrange(referred_date) %>% 
+  slice(1) %>% 
+  group_by(id) %>% 
+  summarise(referred_flag = max(referred_flag)) %>% 
+  # Ungroup and count for whole group
+  ungroup() %>% 
+  summarise(year_reg = "Total",
+            individuals = n_distinct(cpr_ids),
+            n_referred = sum(referred_flag),
+            prop_referred = round((n_referred / individuals) * 100, 1))
+
+# By Year
+camhs_tab <- camhs_cpr %>%
+  # Drop subsequent appointments from the same referred date
+  group_by(id, referred_date) %>%
+  arrange(referred_date) %>% 
+  slice(1) %>% 
+  ungroup() %>% 
+  # Add year of CPR registration
+  left_join(cpr_dates, by = "id") %>% 
+  group_by(year_reg, id) %>%
+  summarise(referred_flag = max(referred_flag)) %>% # If they ever got a referral
+  # Ungroup and count for whole group by year
+  ungroup() %>% 
+  group_by(year_reg) %>% 
+  summarise(n_referred = sum(referred_flag)) %>% 
+  right_join(cpr_annual, by = "year_reg") %>% 
+  mutate(prop_referred = round((n_referred / individuals) * 100, 1)) %>% 
+  select(year_reg, individuals, n_referred, prop_referred) %>%
+  rbind(., overall_row3)
+
+# Combined Table - Removing < 5 cells
+n_vars <- c("n_pres", "n_adhd", "n_antidep", "n_referred")
+prop_vars <- c("prop_pres", "prop_adhd", "prop_antidep", "prop_referred")
+
+pis_tab %>% 
+  left_join(camhs_tab, by = c("year_reg", "individuals")) %>%
+  mutate(across(all_of(n_vars), ~ if_else(. < 5, "< 5", as.character(.))),
+         prop_pres = if_else(n_pres == "< 5", " ", as.character(prop_pres)),
+         prop_adhd = if_else(n_adhd == "< 5", " ", as.character(prop_adhd)),
+         prop_antidep = if_else(n_antidep == "< 5", " ", as.character(prop_antidep)),
+         prop_referred = if_else(n_referred == "< 5", " ", as.character(prop_referred))) %>% 
+  rename('Year' = year_reg,
+         'Individuals' = individuals,
+         'With Prescription' = n_pres,
+         'Prescription (%)' = prop_pres,
+         'ADHD Prescription' = n_adhd,
+         'ADHD (%)' = prop_adhd,
+         'Antidep Prescription' = n_antidep,
+         'Antidep (%)' = prop_antidep,
+         'With Referral' = n_referred,
+         'Referral (%)' = prop_referred) %>% 
+#  write_delim("H:/DaSH520/Workspaces/Will/Tables/table3_fixed.csv", delim = ",")
+  gt() %>% 
+  tab_header(
+    title = "Prevalence of Mental Health Prescriptions and CAMHS Referrals for Children on the Child Protection Register (by year of first registration)"
+  ) %>% 
+  tab_spanner(
+    label = 'Prescribing',
+    columns = c('With Prescription', 'Prescription (%)', 'ADHD Prescription', 'ADHD (%)', 'Antidep Prescription', 'Antidep (%)')
+  ) %>%
+  tab_spanner(
+    label = 'CAMHS Referrals',
+    columns = c('With Referral', 'Referral (%)')
+  ) %>% 
+gtsave("table3.docx")
+```
+
+## Unborn Kids
+
+```{r}
+cpr %>% 
+  group_by(pre_birth, chi_matched_flag) %>% 
+  summarise(count = n())
+```
