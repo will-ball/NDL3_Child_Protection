@@ -1,0 +1,83 @@
+---
+title: "Untitled"
+output: html_document
+date: "2023-10-04"
+---
+
+```{r}
+library(tidyverse)
+library(tidylog)
+library(vroom)
+library(janitor)
+```
+
+## Data
+
+```{r}
+outcomes <- vroom("table3_fixed.csv") %>% 
+  slice(1:(n() - 2))
+
+pres <- outcomes %>% 
+  select(Year, Individuals, 'With Prescription') %>% 
+  rename(year = "Year",
+         ind = "Individuals",
+         count = "With Prescription") %>% 
+  mutate(ind = as.numeric(ind),
+         count = as.numeric(count),
+         prop = count / ind,
+         category = "prescriptions")
+
+adhd <- outcomes %>% 
+  select(Year, Individuals, 'ADHD Prescription') %>% 
+  rename(year = "Year",
+         ind = "Individuals",
+         count = "ADHD Prescription") %>% 
+  mutate(ind = as.numeric(ind),
+         count = as.numeric(count),
+         prop = count / ind,
+         category = "adhd")
+
+antidep <- outcomes %>% 
+  select(Year, Individuals, 'Antidep Prescription') %>% 
+  rename(year = "Year",
+         ind = "Individuals",
+         count = "Antidep Prescription") %>% 
+  mutate(ind = as.numeric(ind),
+         count = as.numeric(count),
+         prop = count / ind,
+         category = "antidepressants")
+
+camhs <- outcomes %>% 
+  select(Year, Individuals, 'With Referral') %>% 
+  rename(year = "Year",
+         ind = "Individuals",
+         count = "With Referral") %>% 
+  mutate(ind = as.numeric(ind),
+         count = as.numeric(count),
+         prop = count / ind,
+         category = "camhs")
+
+outcome_data <- bind_rows(pres, adhd, antidep, camhs)
+```
+
+## Plots
+
+```{r}
+categories <- levels(as.factor(outcome_data$category))
+
+for (category_level in categories) {
+  # Filter data for the current outcome level
+  outcome_data_filtered <- outcome_data[outcome_data$category == category_level, ]
+  
+  # Create the plot
+  p <- ggplot(outcome_data_filtered, aes(x = as.factor(year), y = prop)) +
+  geom_point(stat = "identity") +
+  geom_hline(yintercept = outcome_data$prop[outcome_data$year == "Total" & outcome_data$category == category_level], linetype = "dashed") +
+  scale_y_continuous(limits = c(0,NA))
+  
+  # Save the plot to a file (e.g., PNG)
+  filename <- paste("plot_", categories, ".png", sep = "")
+  ggsave(filename, plot = p, width = 6, height = 4, dpi = 500)
+}
+```
+
